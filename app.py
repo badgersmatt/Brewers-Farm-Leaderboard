@@ -281,13 +281,10 @@ def parse_favorites(text: str) -> set[str]:
 
 def mark_favorites(df: pd.DataFrame, favorites: set[str]) -> pd.DataFrame:
     out = df.copy()
-    if out.empty:
-        out["favorite"] = pd.Series(dtype=bool)
-        return out
-    if "PLAYER" not in out.columns:
+    if "PLAYER" in out.columns:
+        out["favorite"] = out["PLAYER"].str.lower().isin(favorites)
+    else:
         out["favorite"] = False
-        return out
-    out["favorite"] = out["PLAYER"].astype(str).str.lower().isin(favorites)
     return out
 
 

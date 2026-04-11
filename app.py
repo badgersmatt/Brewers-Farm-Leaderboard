@@ -281,26 +281,36 @@ def parse_favorites(text: str) -> set[str]:
 
 def mark_favorites(df: pd.DataFrame, favorites: set[str]) -> pd.DataFrame:
     out = df.copy()
-    out["favorite"] = out["PLAYER"].str.lower().isin(favorites)
+    if out.empty:
+        out["favorite"] = pd.Series(dtype=bool)
+        return out
+    if "PLAYER" not in out.columns:
+        out["favorite"] = False
+        return out
+    out["favorite"] = out["PLAYER"].astype(str).str.lower().isin(favorites)
     return out
 
 
 
 def filter_hitters(df: pd.DataFrame, levels: list[str], min_ab: int, favorites_only: bool) -> pd.DataFrame:
+    if df.empty or "level" not in df.columns:
+        return df.copy()
     out = df[df["level"].isin(levels)].copy()
     if "AB" in out.columns:
         out = out[out["AB"].fillna(0) >= min_ab]
-    if favorites_only:
+    if favorites_only and "favorite" in out.columns:
         out = out[out["favorite"]]
     return out
 
 
 
 def filter_pitchers(df: pd.DataFrame, levels: list[str], min_ip: float, favorites_only: bool) -> pd.DataFrame:
+    if df.empty or "level" not in df.columns:
+        return df.copy()
     out = df[df["level"].isin(levels)].copy()
     if "IP" in out.columns:
         out = out[out["IP"].fillna(0) >= min_ip]
-    if favorites_only:
+    if favorites_only and "favorite" in out.columns:
         out = out[out["favorite"]]
     return out
 

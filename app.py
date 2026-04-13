@@ -28,7 +28,18 @@ BREWERS_CSS = """
     background: linear-gradient(160deg, #050f24 0%, #0A2351 60%, #0d2a5e 100%);
     min-height: 100vh;
 }
-.stApp > header { background: transparent !important; border-bottom: 1px solid rgba(255,197,47,0.08); }
+/* Kill the white header bar */
+[data-testid="stHeader"] {
+    background-color: #050f24 !important;
+    background: #050f24 !important;
+    border-bottom: 1px solid rgba(255,197,47,0.08) !important;
+}
+[data-testid="stDecoration"] {
+    background-image: none !important;
+    background: #050f24 !important;
+    display: none !important;
+}
+.stAppToolbar { background: transparent !important; }
 .stMainBlockContainer { padding-top: 1.5rem !important; max-width: 1400px; }
 
 /* ── Typography ───────────────────────────────────────────── */
@@ -163,12 +174,22 @@ code { color: #FFC52F !important; background: rgba(255,197,47,0.1) !important; }
 }
 [data-baseweb="popover"] > div { background-color: #0b1e4a !important; }
 [data-baseweb="menu"],
-[data-baseweb="list"] { background-color: #0b1e4a !important; }
+[data-baseweb="list"] {
+    background-color: #0b1e4a !important;
+    max-height: 320px !important;
+    overflow-y: auto !important;
+}
+/* The UL that holds all options */
+[data-baseweb="menu"] ul,
+[data-baseweb="list"] ul { background-color: #0b1e4a !important; }
 [role="option"] {
     background-color: #0b1e4a !important;
     color: rgba(255,255,255,0.88) !important;
     font-size: 0.88rem !important;
     transition: background-color 0.15s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 [role="option"]:hover {
     background-color: rgba(255,197,47,0.14) !important;
@@ -179,6 +200,10 @@ code { color: #FFC52F !important; background: rgba(255,197,47,0.1) !important; }
     color: #FFC52F !important;
     font-weight: 600 !important;
 }
+/* Multiselect dropdown item text specifically */
+[data-baseweb="menu"] [data-testid="stMarkdownContainer"] p,
+[data-baseweb="popover"] span,
+[data-baseweb="popover"] p { color: rgba(255,255,255,0.88) !important; }
 
 /* ── Text inputs ──────────────────────────────────────────── */
 textarea,
@@ -214,6 +239,13 @@ textarea:focus,
     overflow: hidden !important;
     box-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
+/* Column header sort text — Glide Data Grid renders text in canvas so
+   CSS can't reach it directly, but we can lighten the wrapper bg so
+   the contrast stays readable when the column is active */
+[data-testid="stDataFrame"] { color: white !important; }
+/* The sort selectbox label (sidebar sort dropdown) */
+.stSelectbox label { color: rgba(255,255,255,0.7) !important; }
+.stSelectbox [data-baseweb="select"] span { color: white !important; font-weight: 500 !important; }
 
 /* ── Expanders ────────────────────────────────────────────── */
 [data-testid="stExpander"] {
@@ -459,8 +491,9 @@ def fetch_game_log(player_id: int, group: str) -> pd.DataFrame:
 def fetch_team_hitting(team_id: int, sport_id: int, level_key: str, level_name: str) -> pd.DataFrame:
     try:
         data = safe_get(f"{BASE}/stats", params={
-            "stats": "season", "group": "hitting", "gameType": "R",
-            "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id, "hydrate": "person",
+            "stats": "season", "group": "hitting",
+            "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id,
+            "playerPool": "All",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):
@@ -501,8 +534,9 @@ def fetch_team_hitting(team_id: int, sport_id: int, level_key: str, level_name: 
 def fetch_team_pitching(team_id: int, sport_id: int, level_key: str, level_name: str) -> pd.DataFrame:
     try:
         data = safe_get(f"{BASE}/stats", params={
-            "stats": "season", "group": "pitching", "gameType": "R",
-            "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id, "hydrate": "person",
+            "stats": "season", "group": "pitching",
+            "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id,
+            "playerPool": "All",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):
@@ -785,19 +819,42 @@ if hitters.empty and pitchers.empty:
 
 # ── Column configs ────────────────────────────────────────────────────────────
 HIT_CFG = {
-    "Player": st.column_config.TextColumn(width="medium"),
-    "AVG":    st.column_config.NumberColumn(format="%.3f"),
-    "OBP":    st.column_config.NumberColumn(format="%.3f"),
-    "SLG":    st.column_config.NumberColumn(format="%.3f"),
+    "Player": st.column_config.TextColumn(width="large"),
+    "Level":  st.column_config.TextColumn(width="large"),
+    "Pos":    st.column_config.TextColumn("Pos",  width="small"),
+    "Age":    st.column_config.NumberColumn("Age", width="small"),
+    "G":      st.column_config.NumberColumn("G",   width="small"),
+    "AB":     st.column_config.NumberColumn("AB",  width="small"),
+    "HR":     st.column_config.NumberColumn("HR",  width="small"),
+    "RBI":    st.column_config.NumberColumn("RBI", width="small"),
+    "SB":     st.column_config.NumberColumn("SB",  width="small"),
+    "BB":     st.column_config.NumberColumn("BB",  width="small"),
+    "SO":     st.column_config.NumberColumn("SO",  width="small"),
+    "AVG":    st.column_config.NumberColumn("AVG", format="%.3f", width="small"),
+    "OBP":    st.column_config.NumberColumn("OBP", format="%.3f", width="small"),
+    "SLG":    st.column_config.NumberColumn("SLG", format="%.3f", width="small"),
     "OPS":    st.column_config.ProgressColumn("OPS", format="%.3f", min_value=0, max_value=1.2),
+    "Proj Debut": st.column_config.TextColumn("Proj Debut", width="small"),
     "⭐":     st.column_config.CheckboxColumn(label="Fav", width="small"),
 }
 PIT_CFG = {
-    "Player": st.column_config.TextColumn(width="medium"),
-    "ERA":    st.column_config.NumberColumn(format="%.2f"),
-    "WHIP":   st.column_config.NumberColumn(format="%.2f"),
-    "IP":     st.column_config.NumberColumn(format="%.1f"),
-    "K/BB":   st.column_config.NumberColumn(format="%.2f"),
+    "Player": st.column_config.TextColumn(width="large"),
+    "Level":  st.column_config.TextColumn(width="large"),
+    "Pos":    st.column_config.TextColumn("Pos",  width="small"),
+    "Age":    st.column_config.NumberColumn("Age", width="small"),
+    "G":      st.column_config.NumberColumn("G",   width="small"),
+    "GS":     st.column_config.NumberColumn("GS",  width="small"),
+    "W":      st.column_config.NumberColumn("W",   width="small"),
+    "L":      st.column_config.NumberColumn("L",   width="small"),
+    "SV":     st.column_config.NumberColumn("SV",  width="small"),
+    "HLD":    st.column_config.NumberColumn("HLD", width="small"),
+    "SO":     st.column_config.NumberColumn("SO",  width="small"),
+    "BB":     st.column_config.NumberColumn("BB",  width="small"),
+    "IP":     st.column_config.NumberColumn("IP",  format="%.1f", width="small"),
+    "ERA":    st.column_config.NumberColumn("ERA", format="%.2f", width="small"),
+    "WHIP":   st.column_config.NumberColumn("WHIP",format="%.2f", width="small"),
+    "K/BB":   st.column_config.NumberColumn("K/BB",format="%.2f", width="small"),
+    "Proj Debut": st.column_config.TextColumn("Proj Debut", width="small"),
     "⭐":     st.column_config.CheckboxColumn(label="Fav", width="small"),
 }
 
@@ -889,9 +946,15 @@ with tab_p:
 # Who's Hot tab
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_hot:
-    st.caption(
-        "**Heat index** — Hitters: OPS × log(G+1) − strikeout penalty (min 5 G).  "
-        "Pitchers: inverse ERA/WHIP + K/BB bonus (min 3 G, 5 IP)."
+    st.info(
+        "**How the Heat Index works** — this ranks players by season-to-date performance, "
+        "not just recent games (the leaderboard API returns cumulative stats only). "
+        "**Hitters:** `OPS × log(G+1) − 0.003 × SO` — rewards high on-base + power, "
+        "weights for sample size, penalises strikeouts. "
+        "**Pitchers:** `−ERA×0.4 − WHIP×2 + K/BB×0.3 + log(SO+1)×0.2` — "
+        "lower ERA/WHIP and higher strikeout rate push the score up. "
+        "Minimums: 5 G (hitters), 3 G + 5 IP (pitchers).",
+        icon="ℹ️",
     )
     hh = hot_hitters(hitters)
     hp = hot_pitchers(pitchers)

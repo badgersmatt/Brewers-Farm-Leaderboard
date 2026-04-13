@@ -182,19 +182,23 @@ def fetch_mlb_active_roster() -> set[str]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_team_hitting(team_id: int, level_key: str, level_name: str) -> pd.DataFrame:
+def fetch_team_hitting(team_id: int, sport_id: int, level_key: str, level_name: str) -> pd.DataFrame:
     try:
-        data = safe_get(f"{BASE}/teams/{team_id}/stats", params={
-            "stats":   "season",
-            "group":   "hitting",
-            "season":  CURRENT_YEAR,
+        data = safe_get(f"{BASE}/stats", params={
+            "stats":    "season",
+            "group":    "hitting",
+            "gameType": "R",
+            "season":   CURRENT_YEAR,
+            "teamId":   team_id,
+            "sportId":  sport_id,
+            "hydrate":  "person",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):
             p    = split.get("player", {})
             pos  = split.get("position", {}).get("abbreviation", "")
             s    = split.get("stat", {})
-            dob  = p.get("birthDate")
+            dob  = p.get("birthDate") or p.get("person", {}).get("birthDate")
             a    = age_from_dob(dob)
 
             avg  = float(s.get("avg", 0) or 0)
@@ -234,19 +238,23 @@ def fetch_team_hitting(team_id: int, level_key: str, level_name: str) -> pd.Data
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_team_pitching(team_id: int, level_key: str, level_name: str) -> pd.DataFrame:
+def fetch_team_pitching(team_id: int, sport_id: int, level_key: str, level_name: str) -> pd.DataFrame:
     try:
-        data = safe_get(f"{BASE}/teams/{team_id}/stats", params={
-            "stats":   "season",
-            "group":   "pitching",
-            "season":  CURRENT_YEAR,
+        data = safe_get(f"{BASE}/stats", params={
+            "stats":    "season",
+            "group":    "pitching",
+            "gameType": "R",
+            "season":   CURRENT_YEAR,
+            "teamId":   team_id,
+            "sportId":  sport_id,
+            "hydrate":  "person",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):
             p    = split.get("player", {})
             pos  = split.get("position", {}).get("abbreviation", "P")
             s    = split.get("stat", {})
-            dob  = p.get("birthDate")
+            dob  = p.get("birthDate") or p.get("person", {}).get("birthDate")
             a    = age_from_dob(dob)
 
             era  = float(s.get("era", 0) or 0)
@@ -301,8 +309,8 @@ def load_all_data() -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[str]]:
         tid   = aff["id"]
         lk    = aff["level_key"]
         ln    = aff["level_name"]
-        hit   = fetch_team_hitting(tid, lk, ln)
-        pit   = fetch_team_pitching(tid, lk, ln)
+        hit   = fetch_team_hitting(tid, aff["sport_id"], lk, ln)
+        pit   = fetch_team_pitching(tid, aff["sport_id"], lk, ln)
 
         if hit.empty and pit.empty:
             failed.append(ln)

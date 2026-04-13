@@ -1,14 +1,8 @@
 # Milwaukee Brewers Farm Leaderboard
 
-Streamlit app for tracking Brewers minor leaguers with actual season stats.
+A Streamlit app that pulls current Brewers minor-league stats from official MiLB stat pages and shows separate hitter and pitcher leaderboards by affiliate level.
 
 ## Deploy
-- Upload `app.py` and `requirements.txt` to GitHub
-- Deploy on Streamlit Community Cloud
+- Put `app.py`, `requirements.txt`, and `README.md` in a GitHub repo.
+- Deploy on Streamlit Community Cloud.
 - Main file path: `app.py`
-
-## What it does
-- Pulls Brewers affiliate rosters from MLB Stats API
-- Pulls each player's current-season hitting or pitching stats
-- Builds separate hitter and pitcher leaderboards
-- Lets you mark favorites

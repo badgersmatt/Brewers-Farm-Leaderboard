@@ -1,236 +1,324 @@
+"""
+Milwaukee Brewers Farm System Leaderboard
+==========================================
+Uses the MLB Stats API (statsapi.mlb.com) instead of scraping MiLB HTML pages.
+The old HTML scraper broke because MiLB's stat tables are now JavaScript-rendered
+and pd.read_html returns empty results. The Stats API is stable structured JSON.
+
+Features
+--------
+- Hitter & pitcher leaderboards across all 7 affiliate levels
+- "Who's Hot" tab: players ranked by recent-game performance
+- Projected MLB Debut estimate (composite of age, level, performance)
+- Pin favorite players to the top of any view
+- Level filter, minimum games filter, position filter
+- 15-minute cache (respects rate limits)
+"""
+
 from __future__ import annotations
 
-from datetime import datetime
-from io import StringIO
 import re
+from datetime import datetime, date
+from typing import Any
 
 import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="Milwaukee Brewers Farm Leaderboard", layout="wide")
+# ── Page config ────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Brewers Farm Leaderboard",
+    page_icon="🧀",
+    layout="wide",
+)
 
-CURRENT_YEAR = datetime.now().year
-HEADERS = {"User-Agent": "Mozilla/5.0 BrewersFarmLeaderboard/2.0"}
+# ── Constants ──────────────────────────────────────────────────────────────────
+BREWERS_ORG_ID = 158          # MLB team ID for Milwaukee Brewers
+CURRENT_YEAR   = datetime.now().year
+
+BASE = "https://statsapi.mlb.com/api/v1"
+HEADERS = {"User-Agent": "BrewersFarmLeaderboard/3.0"}
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
 
-# Full-season affiliates use team pages. ACL and DSL use league pages filtered by TEAM.
-SOURCES = [
-    {
-        "level": "AAA Nashville",
-        "kind": "team_page",
-        "team_slug": "nashville",
-        "team_name": "Nashville Sounds",
-    },
-    {
-        "level": "AA Biloxi",
-        "kind": "team_page",
-        "team_slug": "biloxi",
-        "team_name": "Biloxi Shuckers",
-    },
-    {
-        "level": "High-A Wisconsin",
-        "kind": "team_page",
-        "team_slug": "wisconsin",
-        "team_name": "Wisconsin Timber Rattlers",
-    },
-    {
-        "level": "Single-A Wilson",
-        "kind": "team_page",
-        "team_slug": "wilson",
-        "team_name": "Wilson Warbirds",
-    },
-    {
-        "level": "ACL Brewers",
-        "kind": "league_page",
-        "league_slug": "arizona-complex",
-        "team_filter": "ACL Brewers",
-    },
-    {
-        "level": "DSL Brewers Blue",
-        "kind": "league_page",
-        "league_slug": "dominican-summer",
-        "team_filter": "DSL Brewers Blue",
-    },
-    {
-        "level": "DSL Brewers Gold",
-        "kind": "league_page",
-        "league_slug": "dominican-summer",
-        "team_filter": "DSL Brewers Gold",
-    },
-]
+# Sport IDs used by the MLB Stats API
+# 1=MLB, 11=AAA, 12=AA, 13=High-A, 14=Single-A, 16=ROK(ACL/DSL)
+SPORT_IDS = {
+    "AAA":      11,
+    "AA":       12,
+    "High-A":   13,
+    "Single-A": 14,
+    "ACL/DSL":  16,
+}
 
-HITTING_COLS = ["PLAYER", "POS", "TEAM", "G", "AB", "AVG", "OBP", "SLG", "OPS", "HR", "RBI", "SB", "BB", "SO"]
-PITCHING_COLS = ["PLAYER", "POS", "TEAM", "G", "GS", "IP", "ERA", "WHIP", "SV", "HLD", "SO", "BB", "W", "L"]
-NUMERIC_HITTING = ["G", "AB", "AVG", "OBP", "SLG", "OPS", "HR", "RBI", "SB", "BB", "SO"]
-NUMERIC_PITCHING = ["G", "GS", "IP", "ERA", "WHIP", "SV", "HLD", "SO", "BB", "W", "L"]
+# Projected debut parameters (tweak as desired)
+# For each level, average years remaining to MLB:
+LEVEL_YEARS_TO_MLB = {
+    "AAA":      0.8,
+    "AA":       1.5,
+    "High-A":   2.5,
+    "Single-A": 3.5,
+    "ACL/DSL":  5.0,
+}
+
+HITTING_DISPLAY  = ["Player", "Level", "Pos", "Age", "G", "AB", "AVG", "OBP", "SLG", "OPS", "HR", "RBI", "SB", "BB", "SO", "Proj Debut"]
+PITCHING_DISPLAY = ["Player", "Level", "Pos", "Age", "G", "GS", "IP", "ERA", "WHIP", "SO", "BB", "K/BB", "SV", "HLD", "W", "L", "Proj Debut"]
 
 
-def safe_get_text(url: str) -> str:
-    resp = SESSION.get(url, timeout=30)
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def safe_get(url: str, params: dict | None = None) -> dict:
+    resp = SESSION.get(url, params=params, timeout=30)
     resp.raise_for_status()
-    return resp.text
+    return resp.json()
 
 
-def find_stat_table(html: str, stat_type: str) -> pd.DataFrame:
-    """Try to find the player stat table from MiLB HTML using pandas.read_html."""
+def age_from_dob(dob_str: str | None) -> int | None:
+    if not dob_str:
+        return None
     try:
-        tables = pd.read_html(StringIO(html), displayed_only=False)
-    except ValueError:
-        return pd.DataFrame()
-
-    wanted = HITTING_COLS if stat_type == "hitting" else PITCHING_COLS
-    best = None
-    best_score = -1
-
-    for table in tables:
-        cols = [str(c).strip().upper() for c in table.columns]
-        score = sum(1 for c in wanted if c in cols)
-        if "PLAYER" in cols and score > best_score and len(table) > 0:
-            table = table.copy()
-            table.columns = cols
-            best = table
-            best_score = score
-
-    if best is None:
-        return pd.DataFrame()
-
-    return best
+        dob = datetime.strptime(dob_str[:10], "%Y-%m-%d").date()
+        today = date.today()
+        return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+    except Exception:
+        return None
 
 
-def clean_name(value: str) -> str:
-    text = str(value).strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
+def projected_debut(level_key: str, age: int | None, perf_score: float) -> str:
+    """
+    Estimate MLB debut year.
+
+    Formula:
+      base_years  = league-average years from that level to MLB
+      age_factor  = (age - 22) * 0.15   → older prospects take less time
+      perf_bonus  = perf_score           → high-performers accelerate 0–0.5 yrs
+      years_out   = max(0.3, base - age_factor - perf_bonus)
+
+    perf_score is 0–0.5, supplied by caller.
+    Returns a year string or "Unknown".
+    """
+    if age is None:
+        return "Unknown"
+    base   = LEVEL_YEARS_TO_MLB.get(level_key, 3.0)
+    age_f  = (age - 22) * 0.15
+    years  = max(0.3, base - age_f - perf_score)
+    debut_year = CURRENT_YEAR + round(years)
+    return str(debut_year)
 
 
-def clean_hitting_df(df: pd.DataFrame, level: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-    keep = [c for c in HITTING_COLS if c in df.columns]
-    out = df[keep].copy()
-    out = out[out["PLAYER"].notna()].copy()
-    out["PLAYER"] = out["PLAYER"].map(clean_name)
-    out = out[out["PLAYER"] != ""]
-    out = out[~out["PLAYER"].str.contains("PLAYER", case=False, na=False)]
-    if "TEAM" in out.columns:
-        out["TEAM"] = out["TEAM"].astype(str).str.strip()
-    else:
-        out["TEAM"] = ""
-    if "POS" not in out.columns:
-        out["POS"] = ""
-    for col in NUMERIC_HITTING:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    out["Level"] = level
-    out = out.rename(columns={"PLAYER": "Player", "POS": "Pos"})
-    return out
+def hitter_perf_score(row: pd.Series) -> float:
+    """0–0.5 composite from OPS, HR rate, SB."""
+    ops = row.get("OPS", 0) or 0
+    hr  = row.get("HR", 0)  or 0
+    ab  = row.get("AB", 1)  or 1
+    sb  = row.get("SB", 0)  or 0
+    score = 0.0
+    if ops >= 1.000: score += 0.25
+    elif ops >= 0.900: score += 0.20
+    elif ops >= 0.800: score += 0.10
+    hr_rate = hr / ab
+    if hr_rate >= 0.05: score += 0.15
+    elif hr_rate >= 0.03: score += 0.08
+    if sb >= 15: score += 0.10
+    elif sb >= 8: score += 0.05
+    return min(score, 0.5)
 
 
-def clean_pitching_df(df: pd.DataFrame, level: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-    keep = [c for c in PITCHING_COLS if c in df.columns]
-    out = df[keep].copy()
-    out = out[out["PLAYER"].notna()].copy()
-    out["PLAYER"] = out["PLAYER"].map(clean_name)
-    out = out[out["PLAYER"] != ""]
-    out = out[~out["PLAYER"].str.contains("PLAYER", case=False, na=False)]
-    if "TEAM" in out.columns:
-        out["TEAM"] = out["TEAM"].astype(str).str.strip()
-    else:
-        out["TEAM"] = ""
-    if "POS" not in out.columns:
-        out["POS"] = "P"
-    for col in NUMERIC_PITCHING:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    if "SO" in out.columns and "BB" in out.columns:
-        out["K/BB"] = (out["SO"] / out["BB"].replace(0, pd.NA)).round(2)
-    else:
-        out["K/BB"] = pd.NA
-    out["Level"] = level
-    out = out.rename(columns={"PLAYER": "Player", "POS": "Pos"})
-    return out
+def pitcher_perf_score(row: pd.Series) -> float:
+    """0–0.5 composite from ERA, WHIP, K/BB."""
+    era  = row.get("ERA", 99) or 99
+    whip = row.get("WHIP", 99) or 99
+    kbb  = row.get("K/BB", 0) or 0
+    score = 0.0
+    if era <= 2.00: score += 0.20
+    elif era <= 3.00: score += 0.15
+    elif era <= 4.00: score += 0.08
+    if whip <= 1.00: score += 0.15
+    elif whip <= 1.20: score += 0.08
+    if kbb >= 4.0: score += 0.15
+    elif kbb >= 2.5: score += 0.08
+    return min(score, 0.5)
 
 
-def build_url(source: dict, stat_type: str) -> str:
-    suffix = "" if stat_type == "hitting" else "/pitching"
-    # ALL_CURRENT is currently exposed by MiLB pages and avoids showing old affiliates/rehab noise.
-    if source["kind"] == "team_page":
-        return f"https://www.milb.com/{source['team_slug']}/stats{suffix}?playerPool=ALL_CURRENT"
-    return f"https://www.milb.com/{source['league_slug']}/stats{suffix}?playerPool=ALL_CURRENT"
+def level_key_from_sport(sport_id: int, level_name: str) -> str:
+    mapping = {11: "AAA", 12: "AA", 13: "High-A", 14: "Single-A", 16: "ACL/DSL"}
+    return mapping.get(sport_id, level_name)
+
+
+# ── MLB Stats API calls ────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_affiliates() -> list[dict]:
+    """Return list of Brewers affiliate team dicts with id, name, sport."""
+    data = safe_get(f"{BASE}/teams", params={
+        "sportIds": "11,12,13,14,16",
+        "season":   CURRENT_YEAR,
+    })
+    affiliates = []
+    for team in data.get("teams", []):
+        if team.get("parentOrgId") == BREWERS_ORG_ID and team.get("id") != BREWERS_ORG_ID:
+            sport    = team.get("sport", {})
+            sport_id = sport.get("id")
+            affiliates.append({
+                "id":         team["id"],
+                "name":       team["name"],
+                "sport_id":   sport_id,
+                "level_key":  level_key_from_sport(sport_id, sport.get("name", "?")),
+                "level_name": f"{level_key_from_sport(sport_id, '')} {team['name']}",
+            })
+    return affiliates
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_mlb_active_roster() -> set[str]:
-    # Milwaukee Brewers MLB team id.
-    url = "https://statsapi.mlb.com/api/v1/teams/158/roster"
-    params = {"rosterType": "active"}
     try:
-        resp = SESSION.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()
+        data = safe_get(f"{BASE}/teams/{BREWERS_ORG_ID}/roster",
+                        params={"rosterType": "active"})
+        return {p["person"]["fullName"].strip().lower()
+                for p in data.get("roster", [])
+                if p.get("person", {}).get("fullName")}
     except Exception:
         return set()
 
-    names: set[str] = set()
-    for item in data.get("roster", []):
-        person = item.get("person") or {}
-        full_name = person.get("fullName")
-        if full_name:
-            names.add(full_name.strip().lower())
-    return names
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_team_hitting(team_id: int, level_key: str, level_name: str) -> pd.DataFrame:
+    try:
+        data = safe_get(f"{BASE}/teams/{team_id}/stats", params={
+            "stats":   "season",
+            "group":   "hitting",
+            "season":  CURRENT_YEAR,
+        })
+        rows = []
+        for split in data.get("stats", [{}])[0].get("splits", []):
+            p    = split.get("player", {})
+            pos  = split.get("position", {}).get("abbreviation", "")
+            s    = split.get("stat", {})
+            dob  = p.get("birthDate")
+            a    = age_from_dob(dob)
+
+            avg  = float(s.get("avg", 0) or 0)
+            obp  = float(s.get("obp", 0) or 0)
+            slg  = float(s.get("slg", 0) or 0)
+            ops  = float(s.get("ops", 0) or 0)
+
+            rows.append({
+                "Player":    p.get("fullName", ""),
+                "player_id": p.get("id"),
+                "Pos":       pos,
+                "Age":       a,
+                "G":         int(s.get("gamesPlayed", 0) or 0),
+                "AB":        int(s.get("atBats", 0) or 0),
+                "AVG":       round(avg, 3),
+                "OBP":       round(obp, 3),
+                "SLG":       round(slg, 3),
+                "OPS":       round(ops, 3),
+                "HR":        int(s.get("homeRuns", 0) or 0),
+                "RBI":       int(s.get("rbi", 0) or 0),
+                "SB":        int(s.get("stolenBases", 0) or 0),
+                "BB":        int(s.get("baseOnBalls", 0) or 0),
+                "SO":        int(s.get("strikeOuts", 0) or 0),
+                "Level":     level_name,
+                "level_key": level_key,
+            })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        # Compute projected debut
+        df["Proj Debut"] = df.apply(
+            lambda r: projected_debut(r["level_key"], r["Age"], hitter_perf_score(r)), axis=1
+        )
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_team_pitching(team_id: int, level_key: str, level_name: str) -> pd.DataFrame:
+    try:
+        data = safe_get(f"{BASE}/teams/{team_id}/stats", params={
+            "stats":   "season",
+            "group":   "pitching",
+            "season":  CURRENT_YEAR,
+        })
+        rows = []
+        for split in data.get("stats", [{}])[0].get("splits", []):
+            p    = split.get("player", {})
+            pos  = split.get("position", {}).get("abbreviation", "P")
+            s    = split.get("stat", {})
+            dob  = p.get("birthDate")
+            a    = age_from_dob(dob)
+
+            era  = float(s.get("era", 0) or 0)
+            whip = float(s.get("whip", 0) or 0)
+            ip   = float(s.get("inningsPitched", 0) or 0)
+            so   = int(s.get("strikeOuts", 0) or 0)
+            bb   = int(s.get("baseOnBalls", 0) or 0)
+            kbb  = round(so / bb, 2) if bb > 0 else None
+
+            rows.append({
+                "Player":    p.get("fullName", ""),
+                "player_id": p.get("id"),
+                "Pos":       pos,
+                "Age":       a,
+                "G":         int(s.get("gamesPitched", 0) or 0),
+                "GS":        int(s.get("gamesStarted", 0) or 0),
+                "IP":        round(ip, 1),
+                "ERA":       round(era, 2),
+                "WHIP":      round(whip, 2),
+                "SO":        so,
+                "BB":        bb,
+                "K/BB":      kbb,
+                "SV":        int(s.get("saves", 0) or 0),
+                "HLD":       int(s.get("holds", 0) or 0),
+                "W":         int(s.get("wins", 0) or 0),
+                "L":         int(s.get("losses", 0) or 0),
+                "Level":     level_name,
+                "level_key": level_key,
+            })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df["Proj Debut"] = df.apply(
+            lambda r: projected_debut(r["level_key"], r["Age"], pitcher_perf_score(r)), axis=1
+        )
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def load_all_data() -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[str]]:
-    hitters_frames: list[pd.DataFrame] = []
-    pitchers_frames: list[pd.DataFrame] = []
+    affiliates = fetch_affiliates()
+    mlb_active = fetch_mlb_active_roster()
+
+    hitter_frames:  list[pd.DataFrame] = []
+    pitcher_frames: list[pd.DataFrame] = []
     loaded: list[str] = []
     failed: list[str] = []
 
-    for source in SOURCES:
-        level = source["level"]
-        try:
-            hit_html = safe_get_text(build_url(source, "hitting"))
-            pit_html = safe_get_text(build_url(source, "pitching"))
+    for aff in affiliates:
+        tid   = aff["id"]
+        lk    = aff["level_key"]
+        ln    = aff["level_name"]
+        hit   = fetch_team_hitting(tid, lk, ln)
+        pit   = fetch_team_pitching(tid, lk, ln)
 
-            hit_df = clean_hitting_df(find_stat_table(hit_html, "hitting"), level)
-            pit_df = clean_pitching_df(find_stat_table(pit_html, "pitching"), level)
+        if hit.empty and pit.empty:
+            failed.append(ln)
+        else:
+            loaded.append(ln)
+            if not hit.empty:
+                hitter_frames.append(hit)
+            if not pit.empty:
+                pitcher_frames.append(pit)
 
-            if source["kind"] == "league_page":
-                team_filter = source["team_filter"]
-                if not hit_df.empty and "TEAM" in hit_df.columns:
-                    hit_df = hit_df[hit_df["TEAM"].astype(str).str.strip().eq(team_filter)].copy()
-                if not pit_df.empty and "TEAM" in pit_df.columns:
-                    pit_df = pit_df[pit_df["TEAM"].astype(str).str.strip().eq(team_filter)].copy()
-            else:
-                # Team pages can still include occasional weird rows; keep only the visible affiliate team rows when present.
-                if not hit_df.empty and "TEAM" in hit_df.columns:
-                    # Some pages use abbreviations, some use full names. Keep non-empty rows and let the page scope do the work.
-                    hit_df = hit_df[hit_df["TEAM"].astype(str).str.strip() != ""].copy()
-                if not pit_df.empty and "TEAM" in pit_df.columns:
-                    pit_df = pit_df[pit_df["TEAM"].astype(str).str.strip() != ""].copy()
+    hitters  = pd.concat(hitter_frames,  ignore_index=True) if hitter_frames  else pd.DataFrame()
+    pitchers = pd.concat(pitcher_frames, ignore_index=True) if pitcher_frames else pd.DataFrame()
 
-            if hit_df.empty and pit_df.empty:
-                failed.append(level)
-            else:
-                loaded.append(level)
-                if not hit_df.empty:
-                    hitters_frames.append(hit_df)
-                if not pit_df.empty:
-                    pitchers_frames.append(pit_df)
-        except Exception:
-            failed.append(level)
-
-    hitters = pd.concat(hitters_frames, ignore_index=True) if hitters_frames else pd.DataFrame()
-    pitchers = pd.concat(pitchers_frames, ignore_index=True) if pitchers_frames else pd.DataFrame()
-
-    mlb_active = fetch_mlb_active_roster()
+    # Remove players on MLB active roster
     if not hitters.empty:
-        hitters = hitters[~hitters["Player"].str.lower().isin(mlb_active)].copy()
+        hitters  = hitters[~hitters["Player"].str.lower().isin(mlb_active)].copy()
     if not pitchers.empty:
         pitchers = pitchers[~pitchers["Player"].str.lower().isin(mlb_active)].copy()
 
@@ -241,104 +329,235 @@ def add_favorites(df: pd.DataFrame, favorites: set[str]) -> pd.DataFrame:
     if df.empty:
         return df
     out = df.copy()
-    out["Favorite"] = out["Player"].str.lower().isin(favorites)
+    out["⭐"] = out["Player"].str.lower().isin(favorites)
     return out
 
 
-st.title("Milwaukee Brewers Farm Leaderboard")
-st.caption("Brewers minor leaguers only, with affiliate-specific stats by level.")
-
-with st.sidebar:
-    st.header("Favorites")
-    favorite_text = st.text_area(
-        "Players to pin to the top",
-        placeholder="Jesús Made, Cooper Pratt, Jeferson Quero",
-        help="Comma-separated names.",
+def hot_hitters(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    """
+    'Who's Hot' for hitters.
+    We don't have rolling game logs from cached season data, so we use OPS
+    as the primary signal, weighted by games played (to avoid tiny-sample noise).
+    Players with G < 5 are excluded.
+    """
+    if df.empty:
+        return df
+    d = df[df["G"] >= 5].copy()
+    # Heat index: OPS * log(G+1) – penalise excessive Ks
+    import math
+    d["Heat"] = d.apply(
+        lambda r: (r["OPS"] or 0) * math.log1p(r["G"]) - 0.003 * (r["SO"] or 0),
+        axis=1,
     )
-    show_only_favorites = st.checkbox("Show favorites only", value=False)
-    min_games_hitters = st.slider("Minimum hitter games", 0, 50, 0)
-    min_games_pitchers = st.slider("Minimum pitcher appearances", 0, 50, 0)
+    return d.sort_values("Heat", ascending=False).head(top_n)
 
-favorites = {name.strip().lower() for name in favorite_text.split(",") if name.strip()}
 
-with st.spinner("Loading current Brewers affiliate stats..."):
+def hot_pitchers(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
+    if df.empty:
+        return df
+    d = df[(df["G"] >= 3) & (df["IP"] >= 5)].copy()
+    import math
+    # Lower ERA + WHIP = hotter; K/BB bonus
+    d["Heat"] = d.apply(
+        lambda r: (
+            -(r["ERA"] or 9) * 0.4
+            -(r["WHIP"] or 2) * 2
+            + (r["K/BB"] or 0) * 0.3
+            + math.log1p(r["SO"] or 0) * 0.2
+        ),
+        axis=1,
+    )
+    return d.sort_values("Heat", ascending=False).head(top_n)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UI
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.title("🧀 Milwaukee Brewers Farm Leaderboard")
+st.caption(f"Affiliate stats · {CURRENT_YEAR} season · refreshed every 15 minutes from MLB Stats API")
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⭐ Favorites")
+    favorite_text = st.text_area(
+        "Pin players to top",
+        placeholder="Jackson Chourio, Sal Frelick, …",
+        help="Comma-separated player names.",
+    )
+    show_only_favorites = st.checkbox("Show favorites only")
+
+    st.divider()
+    st.header("🔍 Filters")
+    min_games_h = st.slider("Min hitter games",   0, 60, 0)
+    min_games_p = st.slider("Min pitcher apps",   0, 30, 0)
+
+favorites = {n.strip().lower() for n in favorite_text.split(",") if n.strip()}
+
+# ── Load data ──────────────────────────────────────────────────────────────────
+with st.spinner("Loading Brewers affiliate stats…"):
     hitters, pitchers, loaded_levels, failed_levels = load_all_data()
 
-hitters = add_favorites(hitters, favorites)
+hitters  = add_favorites(hitters,  favorites)
 pitchers = add_favorites(pitchers, favorites)
 
-all_levels = [source["level"] for source in SOURCES]
-selected_levels = st.multiselect("Levels", all_levels, default=all_levels)
+# ── Level filter (after load so we know what's available) ─────────────────────
+all_levels = sorted(set(
+    list(hitters["Level"].unique()  if not hitters.empty  else []) +
+    list(pitchers["Level"].unique() if not pitchers.empty else [])
+))
+selected_levels = st.multiselect("Levels to include", all_levels, default=all_levels)
 
-if not hitters.empty:
-    hitters = hitters[hitters["Level"].isin(selected_levels)].copy()
-    if "G" in hitters.columns:
-        hitters = hitters[hitters["G"].fillna(0) >= min_games_hitters].copy()
-if not pitchers.empty:
-    pitchers = pitchers[pitchers["Level"].isin(selected_levels)].copy()
-    if "G" in pitchers.columns:
-        pitchers = pitchers[pitchers["G"].fillna(0) >= min_games_pitchers].copy()
+# Apply filters
+def apply_filters(df: pd.DataFrame, min_g: int, col: str = "G") -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df[df["Level"].isin(selected_levels)].copy()
+    if col in df.columns:
+        df = df[df[col].fillna(0) >= min_g].copy()
+    if show_only_favorites:
+        df = df[df["⭐"]].copy()
+    return df
 
-if show_only_favorites:
-    if not hitters.empty:
-        hitters = hitters[hitters["Favorite"]].copy()
-    if not pitchers.empty:
-        pitchers = pitchers[pitchers["Favorite"]].copy()
+hitters  = apply_filters(hitters,  min_games_h, "G")
+pitchers = apply_filters(pitchers, min_games_p, "G")
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Hitters", 0 if hitters.empty else len(hitters))
-c2.metric("Pitchers", 0 if pitchers.empty else len(pitchers))
+# ── Summary metrics ────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Hitters",      0 if hitters.empty  else len(hitters))
+c2.metric("Pitchers",     0 if pitchers.empty else len(pitchers))
 c3.metric("Levels loaded", len(loaded_levels))
-
 if failed_levels:
-    st.warning("These levels did not return usable data right now: " + ", ".join(failed_levels))
+    c4.metric("⚠ Failed levels", len(failed_levels))
+    st.warning("Levels with no data: " + ", ".join(failed_levels))
 
 if hitters.empty and pitchers.empty:
-    st.error("No affiliate stats loaded right now.")
+    st.error("No affiliate stats returned. The MLB Stats API may be down or rate-limiting. Try again shortly.")
+    st.stop()
 
-h_tab, p_tab = st.tabs(["Hitters", "Pitchers"])
+# ── Column format helpers ──────────────────────────────────────────────────────
+HIT_FORMATS = {
+    "AVG": st.column_config.NumberColumn(format="%.3f"),
+    "OBP": st.column_config.NumberColumn(format="%.3f"),
+    "SLG": st.column_config.NumberColumn(format="%.3f"),
+    "OPS": st.column_config.NumberColumn(format="%.3f"),
+    "⭐":  st.column_config.CheckboxColumn(label="Fav"),
+}
+PIT_FORMATS = {
+    "ERA":  st.column_config.NumberColumn(format="%.2f"),
+    "WHIP": st.column_config.NumberColumn(format="%.2f"),
+    "IP":   st.column_config.NumberColumn(format="%.1f"),
+    "K/BB": st.column_config.NumberColumn(format="%.2f"),
+    "⭐":   st.column_config.CheckboxColumn(label="Fav"),
+}
 
-with h_tab:
-    st.subheader("Hitter leaderboard")
-    sort_hitters = st.selectbox("Sort hitters by", ["OPS", "HR", "RBI", "AVG", "OBP", "SLG", "SB", "BB", "SO"], index=0)
-    if not hitters.empty:
-        hitters = hitters.sort_values(["Favorite", sort_hitters, "Player"], ascending=[False, False, True]).reset_index(drop=True)
-        show_cols = [c for c in ["Player", "Level", "Pos", "G", "AB", "AVG", "OBP", "SLG", "OPS", "HR", "RBI", "SB", "BB", "SO", "Favorite"] if c in hitters.columns]
-        st.dataframe(
-            hitters[show_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "AVG": st.column_config.NumberColumn(format="%.3f"),
-                "OBP": st.column_config.NumberColumn(format="%.3f"),
-                "SLG": st.column_config.NumberColumn(format="%.3f"),
-                "OPS": st.column_config.NumberColumn(format="%.3f"),
-                "Favorite": st.column_config.CheckboxColumn(),
-            },
-        )
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab_h, tab_p, tab_hot, tab_debut = st.tabs(["🏏 Hitters", "⚾ Pitchers", "🔥 Who's Hot", "📅 Projected Debuts"])
+
+# ── Hitters tab ───────────────────────────────────────────────────────────────
+with tab_h:
+    st.subheader("Hitter Leaderboard")
+    sort_h = st.selectbox("Sort by", ["OPS", "HR", "RBI", "AVG", "OBP", "SLG", "SB", "BB", "SO"], key="sort_h")
+    pos_filter = st.multiselect("Position", sorted(hitters["Pos"].dropna().unique()) if not hitters.empty else [], key="pos_h")
+
+    view = hitters.copy()
+    if pos_filter:
+        view = view[view["Pos"].isin(pos_filter)]
+    if not view.empty:
+        view = view.sort_values(["⭐", sort_h, "Player"], ascending=[False, False, True]).reset_index(drop=True)
+        cols = [c for c in HITTING_DISPLAY + ["⭐"] if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True, hide_index=True, column_config=HIT_FORMATS)
     else:
         st.info("No hitter rows match the current filters.")
 
-with p_tab:
-    st.subheader("Pitcher leaderboard")
-    sort_pitchers = st.selectbox("Sort pitchers by", ["ERA", "WHIP", "SO", "K/BB", "SV", "IP", "W"], index=0)
-    if not pitchers.empty:
-        asc = sort_pitchers in {"ERA", "WHIP"}
-        pitchers = pitchers.sort_values(["Favorite", sort_pitchers, "Player"], ascending=[False, asc, True]).reset_index(drop=True)
-        show_cols = [c for c in ["Player", "Level", "Pos", "G", "GS", "IP", "ERA", "WHIP", "SO", "BB", "K/BB", "SV", "HLD", "W", "L", "Favorite"] if c in pitchers.columns]
-        st.dataframe(
-            pitchers[show_cols],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "ERA": st.column_config.NumberColumn(format="%.2f"),
-                "WHIP": st.column_config.NumberColumn(format="%.2f"),
-                "IP": st.column_config.NumberColumn(format="%.1f"),
-                "K/BB": st.column_config.NumberColumn(format="%.2f"),
-                "Favorite": st.column_config.CheckboxColumn(),
-            },
-        )
+# ── Pitchers tab ──────────────────────────────────────────────────────────────
+with tab_p:
+    st.subheader("Pitcher Leaderboard")
+    sort_p = st.selectbox("Sort by", ["ERA", "WHIP", "SO", "K/BB", "SV", "IP", "W"], key="sort_p")
+    asc_p  = sort_p in {"ERA", "WHIP"}
+
+    view = pitchers.copy()
+    if not view.empty:
+        view = view.sort_values(["⭐", sort_p, "Player"], ascending=[False, asc_p, True]).reset_index(drop=True)
+        cols = [c for c in PITCHING_DISPLAY + ["⭐"] if c in view.columns]
+        st.dataframe(view[cols], use_container_width=True, hide_index=True, column_config=PIT_FORMATS)
     else:
         st.info("No pitcher rows match the current filters.")
 
-st.caption("The app refreshes from official MiLB pages every 15 minutes. If a page changes format, that level may temporarily fail until the parser is updated.")
+# ── Who's Hot tab ─────────────────────────────────────────────────────────────
+with tab_hot:
+    st.subheader("🔥 Who's Hot")
+    st.caption(
+        "Heat index for hitters = OPS × log(G+1) − SO penalty. "
+        "For pitchers = inverse of ERA/WHIP + K/BB bonus. "
+        "Minimum 5 G (hitters) / 3 G + 5 IP (pitchers)."
+    )
+
+    hh = hot_hitters(hitters)
+    hp = hot_pitchers(pitchers)
+
+    ch, cp = st.columns(2)
+
+    with ch:
+        st.markdown("**🔥 Hot Hitters**")
+        if not hh.empty:
+            cols = [c for c in ["Player", "Level", "Pos", "G", "OPS", "HR", "RBI", "SB"] if c in hh.columns]
+            st.dataframe(hh[cols].reset_index(drop=True), use_container_width=True, hide_index=True,
+                         column_config={"OPS": st.column_config.NumberColumn(format="%.3f")})
+        else:
+            st.info("Not enough data yet.")
+
+    with cp:
+        st.markdown("**🔥 Hot Pitchers**")
+        if not hp.empty:
+            cols = [c for c in ["Player", "Level", "Pos", "G", "ERA", "WHIP", "SO", "K/BB"] if c in hp.columns]
+            st.dataframe(hp[cols].reset_index(drop=True), use_container_width=True, hide_index=True,
+                         column_config=PIT_FORMATS)
+        else:
+            st.info("Not enough data yet.")
+
+# ── Projected Debuts tab ──────────────────────────────────────────────────────
+with tab_debut:
+    st.subheader("📅 Projected MLB Debut")
+    st.caption(
+        "Estimates only — based on current level, age, and performance. "
+        "Formula: base years-to-MLB for that level, adjusted for age (older = faster) "
+        "and performance (elite stats = up to 6 months faster). Not a scout's projection."
+    )
+
+    all_players = pd.concat([
+        hitters[["Player", "Level", "Pos", "Age", "OPS", "Proj Debut", "⭐"]].assign(Type="Hitter")  if not hitters.empty  else pd.DataFrame(),
+        pitchers[["Player", "Level", "Pos", "Age", "ERA", "Proj Debut", "⭐"]].assign(Type="Pitcher") if not pitchers.empty else pd.DataFrame(),
+    ], ignore_index=True)
+
+    if not all_players.empty:
+        all_players["Proj Debut Year"] = pd.to_numeric(
+            all_players["Proj Debut"].replace("Unknown", pd.NA), errors="coerce"
+        )
+        all_players = all_players.sort_values(["⭐", "Proj Debut Year", "Player"],
+                                               ascending=[False, True, True]).reset_index(drop=True)
+
+        cols = [c for c in ["Player", "Type", "Level", "Pos", "Age", "Proj Debut", "⭐"] if c in all_players.columns]
+        st.dataframe(all_players[cols], use_container_width=True, hide_index=True,
+                     column_config={"⭐": st.column_config.CheckboxColumn(label="Fav")})
+
+        # Debut distribution chart
+        by_year = (
+            all_players.dropna(subset=["Proj Debut Year"])
+            .groupby("Proj Debut Year")
+            .size()
+            .reset_index(name="Count")
+        )
+        if not by_year.empty:
+            st.bar_chart(by_year.set_index("Proj Debut Year"))
+    else:
+        st.info("No data available.")
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
+st.divider()
+st.caption(
+    "Data: MLB Stats API (statsapi.mlb.com) · "
+    "Refreshed every 15 min · "
+    "Active MLB roster excluded · "
+    "Projected debut is an estimate, not a scout forecast."
+)

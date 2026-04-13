@@ -710,10 +710,28 @@ def render_game_log(pid, pname: str, group: str, sport_id: int = 1) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 # Session state
 # ══════════════════════════════════════════════════════════════════════════════
+if "favorites" not in st.session_state:
+    st.session_state.favorites = set()
 if "sel_hitter" not in st.session_state:
-    st.session_state.sel_hitter  = None   # {"player_id": int, "name": str}
+    st.session_state.sel_hitter  = None
 if "sel_pitcher" not in st.session_state:
     st.session_state.sel_pitcher = None
+
+
+def last_name_key(full_name: str) -> str:
+    """Return lowercased last name for sorting."""
+    parts = full_name.strip().split()
+    return parts[-1].lower() if parts else full_name.lower()
+
+
+def sync_favorites_from_editor(edited: pd.DataFrame, view: pd.DataFrame) -> None:
+    """Update session state favorites from a data_editor result."""
+    if "⭐" not in edited.columns or "Player" not in edited.columns:
+        return
+    view_names  = set(view["Player"].str.lower())
+    now_fav     = set(edited[edited["⭐"]]["Player"].str.lower())
+    now_unfav   = view_names - now_fav
+    st.session_state.favorites = (st.session_state.favorites - now_unfav) | now_fav
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -751,13 +769,30 @@ with st.sidebar:
     """.format(year=CURRENT_YEAR), unsafe_allow_html=True)
 
     st.divider()
-    st.markdown("**⭐ Favorite Players**")
-    favorite_text = st.text_area(
-        "Pin players to top",
-        placeholder="Jackson Chourio, Sal Frelick, …",
-        help="Comma-separated player names. They'll float to the top of every leaderboard.",
+    st.markdown("**⭐ Favorites**")
+    st.caption("Check ⭐ in the table, or add by name:")
+    fav_input = st.text_input(
+        "Add by name",
+        placeholder="Chourio, Frelick, …",
         label_visibility="collapsed",
+        key="fav_input",
     )
+    ca, cb = st.columns(2)
+    if ca.button("Add", use_container_width=True):
+        for n in fav_input.split(","):
+            n = n.strip().lower()
+            if n:
+                st.session_state.favorites.add(n)
+        st.rerun()
+    if cb.button("Clear all", use_container_width=True):
+        st.session_state.favorites.clear()
+        st.rerun()
+
+    if st.session_state.favorites:
+        st.markdown("Pinned:")
+        for f in sorted(st.session_state.favorites, key=last_name_key):
+            st.caption(f"⭐ {f.title()}")
+
     show_only_favorites = st.checkbox("Show favorites only")
 
     st.divider()
@@ -771,7 +806,7 @@ with st.sidebar:
         "Active MLB roster excluded automatically"
     )
 
-favorites = {n.strip().lower() for n in favorite_text.split(",") if n.strip()}
+favorites = st.session_state.favorites  # single source of truth
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Loading Brewers affiliate stats…"):
@@ -826,44 +861,46 @@ if hitters.empty and pitchers.empty:
     st.stop()
 
 # ── Column configs ────────────────────────────────────────────────────────────
+_sm  = "small"
+_med = "medium"
 HIT_CFG = {
-    "Player": st.column_config.TextColumn(width="large"),
-    "Level":  st.column_config.TextColumn(width="large"),
-    "Pos":    st.column_config.TextColumn("Pos",  width="small"),
-    "Age":    st.column_config.NumberColumn("Age", width="small"),
-    "G":      st.column_config.NumberColumn("G",   width="small"),
-    "AB":     st.column_config.NumberColumn("AB",  width="small"),
-    "HR":     st.column_config.NumberColumn("HR",  width="small"),
-    "RBI":    st.column_config.NumberColumn("RBI", width="small"),
-    "SB":     st.column_config.NumberColumn("SB",  width="small"),
-    "BB":     st.column_config.NumberColumn("BB",  width="small"),
-    "SO":     st.column_config.NumberColumn("SO",  width="small"),
-    "AVG":    st.column_config.NumberColumn("AVG", format="%.3f", width="small"),
-    "OBP":    st.column_config.NumberColumn("OBP", format="%.3f", width="small"),
-    "SLG":    st.column_config.NumberColumn("SLG", format="%.3f", width="small"),
-    "OPS":    st.column_config.ProgressColumn("OPS", format="%.3f", min_value=0, max_value=1.2),
-    "Proj Debut": st.column_config.TextColumn("Proj Debut", width="small"),
-    "⭐":     st.column_config.CheckboxColumn(label="Fav", width="small"),
+    "Player":     st.column_config.TextColumn(width=_med),
+    "Level":      st.column_config.TextColumn(width=_med),
+    "Pos":        st.column_config.TextColumn("Pos", width=_sm),
+    "Age":        st.column_config.NumberColumn("Age", width=_sm),
+    "G":          st.column_config.NumberColumn("G",   width=_sm),
+    "AB":         st.column_config.NumberColumn("AB",  width=_sm),
+    "HR":         st.column_config.NumberColumn("HR",  width=_sm),
+    "RBI":        st.column_config.NumberColumn("RBI", width=_sm),
+    "SB":         st.column_config.NumberColumn("SB",  width=_sm),
+    "BB":         st.column_config.NumberColumn("BB",  width=_sm),
+    "SO":         st.column_config.NumberColumn("SO",  width=_sm),
+    "AVG":        st.column_config.NumberColumn("AVG", format="%.3f", width=_sm),
+    "OBP":        st.column_config.NumberColumn("OBP", format="%.3f", width=_sm),
+    "SLG":        st.column_config.NumberColumn("SLG", format="%.3f", width=_sm),
+    "OPS":        st.column_config.ProgressColumn("OPS", format="%.3f", min_value=0, max_value=1.2),
+    "Proj Debut": st.column_config.TextColumn("Debut", width=_sm),
+    "⭐":         st.column_config.CheckboxColumn("⭐", width=_sm),
 }
 PIT_CFG = {
-    "Player": st.column_config.TextColumn(width="large"),
-    "Level":  st.column_config.TextColumn(width="large"),
-    "Pos":    st.column_config.TextColumn("Pos",  width="small"),
-    "Age":    st.column_config.NumberColumn("Age", width="small"),
-    "G":      st.column_config.NumberColumn("G",   width="small"),
-    "GS":     st.column_config.NumberColumn("GS",  width="small"),
-    "W":      st.column_config.NumberColumn("W",   width="small"),
-    "L":      st.column_config.NumberColumn("L",   width="small"),
-    "SV":     st.column_config.NumberColumn("SV",  width="small"),
-    "HLD":    st.column_config.NumberColumn("HLD", width="small"),
-    "SO":     st.column_config.NumberColumn("SO",  width="small"),
-    "BB":     st.column_config.NumberColumn("BB",  width="small"),
-    "IP":     st.column_config.NumberColumn("IP",  format="%.1f", width="small"),
-    "ERA":    st.column_config.NumberColumn("ERA", format="%.2f", width="small"),
-    "WHIP":   st.column_config.NumberColumn("WHIP",format="%.2f", width="small"),
-    "K/BB":   st.column_config.NumberColumn("K/BB",format="%.2f", width="small"),
-    "Proj Debut": st.column_config.TextColumn("Proj Debut", width="small"),
-    "⭐":     st.column_config.CheckboxColumn(label="Fav", width="small"),
+    "Player":     st.column_config.TextColumn(width=_med),
+    "Level":      st.column_config.TextColumn(width=_med),
+    "Pos":        st.column_config.TextColumn("Pos",  width=_sm),
+    "Age":        st.column_config.NumberColumn("Age", width=_sm),
+    "G":          st.column_config.NumberColumn("G",   width=_sm),
+    "GS":         st.column_config.NumberColumn("GS",  width=_sm),
+    "W":          st.column_config.NumberColumn("W",   width=_sm),
+    "L":          st.column_config.NumberColumn("L",   width=_sm),
+    "SV":         st.column_config.NumberColumn("SV",  width=_sm),
+    "HLD":        st.column_config.NumberColumn("HLD", width=_sm),
+    "SO":         st.column_config.NumberColumn("SO",  width=_sm),
+    "BB":         st.column_config.NumberColumn("BB",  width=_sm),
+    "IP":         st.column_config.NumberColumn("IP",  format="%.1f", width=_sm),
+    "ERA":        st.column_config.NumberColumn("ERA", format="%.2f", width=_sm),
+    "WHIP":       st.column_config.NumberColumn("WHIP",format="%.2f", width=_sm),
+    "K/BB":       st.column_config.NumberColumn("K/BB",format="%.2f", width=_sm),
+    "Proj Debut": st.column_config.TextColumn("Debut", width=_sm),
+    "⭐":         st.column_config.CheckboxColumn("⭐", width=_sm),
 }
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -876,10 +913,10 @@ tab_h, tab_p, tab_hot, tab_debut = st.tabs(
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_h:
     ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 3])
-    sort_h    = ctrl1.selectbox("Sort by", ["OPS","HR","RBI","AVG","OBP","SLG","SB","BB","SO"], key="sort_h")
-    pos_opts  = sorted(hitters["Pos"].dropna().unique()) if not hitters.empty else []
-    pos_filt  = ctrl2.multiselect("Position", pos_opts, key="pos_h")
-    search_h  = ctrl3.text_input("🔎 Search player", key="search_h", placeholder="e.g. Chourio")
+    sort_h   = ctrl1.selectbox("Sort by", ["OPS","HR","RBI","AVG","OBP","SLG","SB","BB","SO","Name"], key="sort_h")
+    pos_opts = sorted(hitters["Pos"].dropna().unique()) if not hitters.empty else []
+    pos_filt = ctrl2.multiselect("Position", pos_opts, key="pos_h")
+    search_h = ctrl3.text_input("🔎 Search player", key="search_h", placeholder="e.g. Chourio")
 
     view = hitters.copy()
     if pos_filt:
@@ -888,31 +925,39 @@ with tab_h:
         view = view[view["Player"].str.contains(search_h, case=False, na=False)]
 
     if not view.empty:
-        view = view.sort_values(["⭐", sort_h, "Player"], ascending=[False, False, True]).reset_index(drop=True)
-        cols = [c for c in HITTING_DISPLAY + ["⭐"] if c in view.columns]
+        view["_last"] = view["Player"].apply(last_name_key)
+        if sort_h == "Name":
+            view = view.sort_values(["⭐", "_last", "Player"], ascending=[False, True, True])
+        else:
+            view = view.sort_values(["⭐", sort_h, "_last"], ascending=[False, False, True])
+        view = view.drop(columns=["_last"]).reset_index(drop=True)
 
-        st.caption("Click any row to view that player's game-by-game log.")
-        event = st.dataframe(
+        cols = [c for c in HITTING_DISPLAY + ["⭐"] if c in view.columns]
+        st.caption("Check ⭐ to pin a player. Use the dropdown below to view a game log.")
+        edited_h = st.data_editor(
             view[cols],
             use_container_width=True,
             hide_index=True,
             column_config=HIT_CFG,
-            on_select="rerun",
-            selection_mode="single-row",
+            disabled=[c for c in cols if c != "⭐"],
             key="hitter_table",
         )
-        sel = event.selection.rows
-        if sel:
-            row = view.iloc[sel[0]]
-            st.session_state.sel_hitter = {
-                "player_id": row.get("player_id"),
-                "name":      row["Player"],
-                "sport_id":  LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
-            }
+        sync_favorites_from_editor(edited_h, view)
 
-        if st.session_state.sel_hitter:
-            info = st.session_state.sel_hitter
-            render_game_log(info["player_id"], info["name"], "hitting", info.get("sport_id", 1))
+        # Game log selector
+        player_opts = [""] + sorted(view["Player"].tolist(), key=last_name_key)
+        sel_h = st.selectbox(
+            "📊 View game log for:",
+            player_opts,
+            format_func=lambda x: "— select a player —" if x == "" else x,
+            key="hitter_log_sel",
+        )
+        if sel_h:
+            row = view[view["Player"] == sel_h].iloc[0]
+            render_game_log(
+                row.get("player_id"), row["Player"], "hitting",
+                LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
+            )
     else:
         st.info("No hitters match the current filters.")
 
@@ -921,7 +966,7 @@ with tab_h:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_p:
     ctrl1, ctrl2 = st.columns([2, 3])
-    sort_p   = ctrl1.selectbox("Sort by", ["ERA","WHIP","SO","K/BB","SV","IP","W"], key="sort_p")
+    sort_p   = ctrl1.selectbox("Sort by", ["ERA","WHIP","SO","K/BB","SV","IP","W","Name"], key="sort_p")
     search_p = ctrl2.text_input("🔎 Search player", key="search_p", placeholder="e.g. Hendrick")
     asc_p    = sort_p in {"ERA", "WHIP"}
 
@@ -930,31 +975,39 @@ with tab_p:
         view = view[view["Player"].str.contains(search_p, case=False, na=False)]
 
     if not view.empty:
-        view = view.sort_values(["⭐", sort_p, "Player"], ascending=[False, asc_p, True]).reset_index(drop=True)
-        cols = [c for c in PITCHING_DISPLAY + ["⭐"] if c in view.columns]
+        view["_last"] = view["Player"].apply(last_name_key)
+        if sort_p == "Name":
+            view = view.sort_values(["⭐", "_last", "Player"], ascending=[False, True, True])
+        else:
+            view = view.sort_values(["⭐", sort_p, "_last"], ascending=[False, asc_p, True])
+        view = view.drop(columns=["_last"]).reset_index(drop=True)
 
-        st.caption("Click any row to view that player's game-by-game log.")
-        event = st.dataframe(
+        cols = [c for c in PITCHING_DISPLAY + ["⭐"] if c in view.columns]
+        st.caption("Check ⭐ to pin a player. Use the dropdown below to view a game log.")
+        edited_p = st.data_editor(
             view[cols],
             use_container_width=True,
             hide_index=True,
             column_config=PIT_CFG,
-            on_select="rerun",
-            selection_mode="single-row",
+            disabled=[c for c in cols if c != "⭐"],
             key="pitcher_table",
         )
-        sel = event.selection.rows
-        if sel:
-            row = view.iloc[sel[0]]
-            st.session_state.sel_pitcher = {
-                "player_id": row.get("player_id"),
-                "name":      row["Player"],
-                "sport_id":  LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
-            }
+        sync_favorites_from_editor(edited_p, view)
 
-        if st.session_state.sel_pitcher:
-            info = st.session_state.sel_pitcher
-            render_game_log(info["player_id"], info["name"], "pitching", info.get("sport_id", 1))
+        # Game log selector
+        player_opts = [""] + sorted(view["Player"].tolist(), key=last_name_key)
+        sel_p = st.selectbox(
+            "📊 View game log for:",
+            player_opts,
+            format_func=lambda x: "— select a player —" if x == "" else x,
+            key="pitcher_log_sel",
+        )
+        if sel_p:
+            row = view[view["Player"] == sel_p].iloc[0]
+            render_game_log(
+                row.get("player_id"), row["Player"], "pitching",
+                LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
+            )
     else:
         st.info("No pitchers match the current filters.")
 

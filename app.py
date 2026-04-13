@@ -770,30 +770,12 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**⭐ Favorites**")
-    st.caption("Check ⭐ in the table, or add by name:")
-    fav_input = st.text_input(
-        "Add by name",
-        placeholder="Chourio, Frelick, …",
-        label_visibility="collapsed",
-        key="fav_input",
-    )
-    ca, cb = st.columns(2)
-    if ca.button("Add", use_container_width=True):
-        for n in fav_input.split(","):
-            n = n.strip().lower()
-            if n:
-                st.session_state.favorites.add(n)
-        st.rerun()
-    if cb.button("Clear all", use_container_width=True):
-        st.session_state.favorites.clear()
-        st.rerun()
-
-    if st.session_state.favorites:
-        st.markdown("Pinned:")
-        for f in sorted(st.session_state.favorites, key=last_name_key):
-            st.caption(f"⭐ {f.title()}")
-
+    st.caption("Toggle ⭐ in the table to mark players.")
     show_only_favorites = st.checkbox("Show favorites only")
+    if st.session_state.favorites:
+        if st.button("Clear all favorites", use_container_width=True):
+            st.session_state.favorites.clear()
+            st.rerun()
 
     st.divider()
     st.markdown("**🔍 Filters**")
@@ -927,9 +909,9 @@ with tab_h:
     if not view.empty:
         view["_last"] = view["Player"].apply(last_name_key)
         if sort_h == "Name":
-            view = view.sort_values(["⭐", "_last", "Player"], ascending=[False, True, True])
+            view = view.sort_values(["_last", "Player"], ascending=[True, True])
         else:
-            view = view.sort_values(["⭐", sort_h, "_last"], ascending=[False, False, True])
+            view = view.sort_values([sort_h, "_last"], ascending=[False, True])
         view = view.drop(columns=["_last"]).reset_index(drop=True)
 
         cols = [c for c in HITTING_DISPLAY + ["⭐"] if c in view.columns]
@@ -977,9 +959,9 @@ with tab_p:
     if not view.empty:
         view["_last"] = view["Player"].apply(last_name_key)
         if sort_p == "Name":
-            view = view.sort_values(["⭐", "_last", "Player"], ascending=[False, True, True])
+            view = view.sort_values(["_last", "Player"], ascending=[True, True])
         else:
-            view = view.sort_values(["⭐", sort_p, "_last"], ascending=[False, asc_p, True])
+            view = view.sort_values([sort_p, "_last"], ascending=[asc_p, True])
         view = view.drop(columns=["_last"]).reset_index(drop=True)
 
         cols = [c for c in PITCHING_DISPLAY + ["⭐"] if c in view.columns]

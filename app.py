@@ -32,6 +32,81 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Brewers theme CSS ─────────────────────────────────────────────────────────
+BREWERS_CSS = """
+<style>
+/* Background */
+.stApp { background: #0A2351; }
+.stApp > header { background: transparent !important; }
+
+/* Typography */
+h1 { color: #FFC52F !important; font-size: 2.4rem !important; font-weight: 800 !important; letter-spacing: -0.5px; }
+h2, h3 { color: #FFC52F !important; }
+p, .stMarkdown, label { color: rgba(255,255,255,0.88) !important; }
+small, .stCaption p { color: rgba(255,255,255,0.5) !important; }
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,197,47,0.25);
+    border-radius: 12px;
+    padding: 1rem 1.25rem !important;
+}
+[data-testid="stMetricLabel"] { color: rgba(255,255,255,0.55) !important; font-size: 0.78rem !important; }
+[data-testid="stMetricValue"] { color: #FFC52F !important; font-weight: 700 !important; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] {
+    background: rgba(255,255,255,0.06);
+    border-radius: 10px;
+    gap: 4px;
+    padding: 4px;
+}
+.stTabs [data-baseweb="tab"] { border-radius: 8px; color: rgba(255,255,255,0.6) !important; font-weight: 500; }
+.stTabs [aria-selected="true"] { background: #FFC52F !important; color: #0A2351 !important; font-weight: 700; }
+
+/* Sidebar */
+[data-testid="stSidebar"] { background: #071838 !important; border-right: 1px solid rgba(255,197,47,0.15); }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color: #FFC52F !important; }
+
+/* Inputs & selects */
+[data-testid="stTextArea"] textarea { background: rgba(255,255,255,0.08) !important; border-color: rgba(255,197,47,0.3) !important; color: white !important; }
+[data-baseweb="select"] > div { background: rgba(255,255,255,0.08) !important; border-color: rgba(255,197,47,0.3) !important; }
+[data-baseweb="tag"] { background: #FFC52F !important; }
+[data-baseweb="tag"] span { color: #0A2351 !important; font-weight: 600 !important; }
+[data-baseweb="popover"] { background: #0e2d5e !important; }
+[data-baseweb="menu"] { background: #0e2d5e !important; }
+li[role="option"] { color: white !important; }
+li[role="option"]:hover { background: rgba(255,197,47,0.15) !important; }
+
+/* Slider */
+[data-testid="stSlider"] div[role="slider"] { background: #FFC52F !important; border-color: #FFC52F !important; }
+[data-testid="stSlider"] [data-testid="stTickBar"] { color: rgba(255,255,255,0.4) !important; }
+
+/* Dataframes */
+[data-testid="stDataFrameResizable"] { border: 1px solid rgba(255,197,47,0.2) !important; border-radius: 10px; overflow: hidden; }
+
+/* Alerts */
+[data-testid="stAlert"] { border-radius: 10px; }
+
+/* Expander */
+[data-testid="stExpander"] { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,197,47,0.2) !important; border-radius: 10px; }
+[data-testid="stExpander"] summary { color: #FFC52F !important; font-weight: 600; }
+
+/* Divider */
+hr { border-color: rgba(255,197,47,0.15) !important; }
+
+/* Spinner */
+[data-testid="stSpinner"] { color: #FFC52F !important; }
+
+/* Checkbox */
+[data-testid="stCheckbox"] span { color: rgba(255,255,255,0.85) !important; }
+
+/* Multiselect selected tag */
+[data-baseweb="tag"] svg { fill: #0A2351 !important; }
+</style>
+"""
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 BREWERS_ORG_ID = 158          # MLB team ID for Milwaukee Brewers
 CURRENT_YEAR   = datetime.now().year
@@ -179,6 +254,67 @@ def fetch_mlb_active_roster() -> set[str]:
                 if p.get("person", {}).get("fullName")}
     except Exception:
         return set()
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_game_log(player_id: int, group: str) -> pd.DataFrame:
+    """Fetch per-game stats for a single player. group = 'hitting' or 'pitching'."""
+    try:
+        data = safe_get(f"{BASE}/people/{player_id}/stats", params={
+            "stats":    "gameLog",
+            "group":    group,
+            "season":   CURRENT_YEAR,
+            "gameType": "R",
+        })
+        splits = data.get("stats", [{}])[0].get("splits", [])
+        rows = []
+        for split in splits:
+            s   = split.get("stat", {})
+            opp = split.get("opponent", {}).get("abbreviation", split.get("opponent", {}).get("name", ""))
+            dt  = split.get("date", "")
+            loc = "vs" if split.get("isHome") else "@"
+
+            if group == "hitting":
+                rows.append({
+                    "Date": dt,
+                    "Opp":  f"{loc} {opp}",
+                    "AB":   int(s.get("atBats", 0) or 0),
+                    "R":    int(s.get("runs", 0) or 0),
+                    "H":    int(s.get("hits", 0) or 0),
+                    "2B":   int(s.get("doubles", 0) or 0),
+                    "3B":   int(s.get("triples", 0) or 0),
+                    "HR":   int(s.get("homeRuns", 0) or 0),
+                    "RBI":  int(s.get("rbi", 0) or 0),
+                    "BB":   int(s.get("baseOnBalls", 0) or 0),
+                    "SO":   int(s.get("strikeOuts", 0) or 0),
+                    "SB":   int(s.get("stolenBases", 0) or 0),
+                    "AVG":  round(float(s.get("avg", 0) or 0), 3),
+                })
+            else:
+                dec = ""
+                if int(s.get("wins", 0) or 0):   dec = "W"
+                elif int(s.get("losses", 0) or 0): dec = "L"
+                elif int(s.get("saves", 0) or 0):  dec = "SV"
+                elif int(s.get("holds", 0) or 0):  dec = "HLD"
+                rows.append({
+                    "Date": dt,
+                    "Opp":  f"{loc} {opp}",
+                    "Dec":  dec,
+                    "IP":   round(float(s.get("inningsPitched", 0) or 0), 1),
+                    "H":    int(s.get("hits", 0) or 0),
+                    "R":    int(s.get("runs", 0) or 0),
+                    "ER":   int(s.get("earnedRuns", 0) or 0),
+                    "BB":   int(s.get("baseOnBalls", 0) or 0),
+                    "SO":   int(s.get("strikeOuts", 0) or 0),
+                    "HR":   int(s.get("homeRuns", 0) or 0),
+                    "ERA":  round(float(s.get("era", 0) or 0), 2),
+                })
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df = df.sort_values("Date", ascending=False).reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -382,6 +518,8 @@ def hot_pitchers(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
 
+st.markdown(BREWERS_CSS, unsafe_allow_html=True)
+
 st.title("🧀 Milwaukee Brewers Farm Leaderboard")
 st.caption(f"Affiliate stats · {CURRENT_YEAR} season · refreshed every 15 minutes from MLB Stats API")
 
@@ -437,7 +575,15 @@ c2.metric("Pitchers",     0 if pitchers.empty else len(pitchers))
 c3.metric("Levels loaded", len(loaded_levels))
 if failed_levels:
     c4.metric("⚠ Failed levels", len(failed_levels))
-    st.warning("Levels with no data: " + ", ".join(failed_levels))
+    acl_dsl = all("ACL" in l or "DSL" in l for l in failed_levels)
+    if acl_dsl:
+        st.info(
+            f"**{', '.join(failed_levels)}** — no data yet. "
+            "The ACL and DSL rookie leagues don't start until June–July. "
+            "They'll populate automatically once the season begins."
+        )
+    else:
+        st.warning("Levels with no data: " + ", ".join(failed_levels))
 
 if hitters.empty and pitchers.empty:
     st.error("No affiliate stats returned. The MLB Stats API may be down or rate-limiting. Try again shortly.")
@@ -474,7 +620,27 @@ with tab_h:
     if not view.empty:
         view = view.sort_values(["⭐", sort_h, "Player"], ascending=[False, False, True]).reset_index(drop=True)
         cols = [c for c in HITTING_DISPLAY + ["⭐"] if c in view.columns]
-        st.dataframe(view[cols], use_container_width=True, hide_index=True, column_config=HIT_FORMATS)
+        st.caption("Click a row to see that player's game log.")
+        event = st.dataframe(
+            view[cols], use_container_width=True, hide_index=True,
+            column_config=HIT_FORMATS,
+            on_select="rerun", selection_mode="single-row",
+            key="hitter_table",
+        )
+        sel = event.selection.rows
+        if sel:
+            row = view.iloc[sel[0]]
+            pid, pname = row.get("player_id"), row["Player"]
+            with st.expander(f"📊 {pname} — Game Log ({CURRENT_YEAR})", expanded=True):
+                with st.spinner("Loading game log…"):
+                    log = fetch_game_log(int(pid), "hitting")
+                if log.empty:
+                    st.info("No game log available yet.")
+                else:
+                    st.dataframe(
+                        log, use_container_width=True, hide_index=True,
+                        column_config={"AVG": st.column_config.NumberColumn(format="%.3f")},
+                    )
     else:
         st.info("No hitter rows match the current filters.")
 
@@ -488,7 +654,30 @@ with tab_p:
     if not view.empty:
         view = view.sort_values(["⭐", sort_p, "Player"], ascending=[False, asc_p, True]).reset_index(drop=True)
         cols = [c for c in PITCHING_DISPLAY + ["⭐"] if c in view.columns]
-        st.dataframe(view[cols], use_container_width=True, hide_index=True, column_config=PIT_FORMATS)
+        st.caption("Click a row to see that player's game log.")
+        event = st.dataframe(
+            view[cols], use_container_width=True, hide_index=True,
+            column_config=PIT_FORMATS,
+            on_select="rerun", selection_mode="single-row",
+            key="pitcher_table",
+        )
+        sel = event.selection.rows
+        if sel:
+            row = view.iloc[sel[0]]
+            pid, pname = row.get("player_id"), row["Player"]
+            with st.expander(f"📊 {pname} — Game Log ({CURRENT_YEAR})", expanded=True):
+                with st.spinner("Loading game log…"):
+                    log = fetch_game_log(int(pid), "pitching")
+                if log.empty:
+                    st.info("No game log available yet.")
+                else:
+                    st.dataframe(
+                        log, use_container_width=True, hide_index=True,
+                        column_config={
+                            "IP":  st.column_config.NumberColumn(format="%.1f"),
+                            "ERA": st.column_config.NumberColumn(format="%.2f"),
+                        },
+                    )
     else:
         st.info("No pitcher rows match the current filters.")
 

@@ -434,7 +434,7 @@ def fetch_game_log(player_id: int, group: str) -> pd.DataFrame:
     try:
         data   = safe_get(f"{BASE}/people/{player_id}/stats", params={
             "stats": "gameLog", "group": group,
-            "season": CURRENT_YEAR, "gameType": "R",
+            "season": CURRENT_YEAR,
         })
         splits = data.get("stats", [{}])[0].get("splits", [])
         rows   = []
@@ -493,7 +493,7 @@ def fetch_team_hitting(team_id: int, sport_id: int, level_key: str, level_name: 
         data = safe_get(f"{BASE}/stats", params={
             "stats": "season", "group": "hitting",
             "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id,
-            "playerPool": "All",
+            "playerPool": "All", "hydrate": "person",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):
@@ -536,7 +536,7 @@ def fetch_team_pitching(team_id: int, sport_id: int, level_key: str, level_name:
         data = safe_get(f"{BASE}/stats", params={
             "stats": "season", "group": "pitching",
             "season": CURRENT_YEAR, "teamId": team_id, "sportId": sport_id,
-            "playerPool": "All",
+            "playerPool": "All", "hydrate": "person",
         })
         rows = []
         for split in data.get("stats", [{}])[0].get("splits", []):

@@ -232,6 +232,9 @@ textarea:focus,
 /* ── Checkbox ─────────────────────────────────────────────── */
 [data-testid="stCheckbox"] label p { color: rgba(255,255,255,0.85) !important; }
 
+/* ── Dataframe toolbar (CSV download, fullscreen) ─────────── */
+[data-testid="stElementToolbar"] { display: none !important; }
+
 /* ── Dataframes ───────────────────────────────────────────── */
 [data-testid="stDataFrameResizable"] {
     border: 1px solid rgba(255,197,47,0.14) !important;
@@ -387,6 +390,8 @@ def pitcher_perf_score(row: pd.Series) -> float:
 def level_key_from_sport(sport_id: int, fallback: str = "?") -> str:
     return {11: "AAA", 12: "AA", 13: "High-A", 14: "Single-A", 16: "ACL/DSL"}.get(sport_id, fallback)
 
+LEVEL_KEY_TO_SPORT_ID = {"AAA": 11, "AA": 12, "High-A": 13, "Single-A": 14, "ACL/DSL": 16}
+
 
 def valid_player_id(pid) -> bool:
     """Return True if pid is a usable integer player ID."""
@@ -430,13 +435,16 @@ def fetch_mlb_active_roster() -> set[str]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def fetch_game_log(player_id: int, group: str) -> pd.DataFrame:
+def fetch_game_log(player_id: int, group: str, sport_id: int = 1) -> pd.DataFrame:
     try:
         data   = safe_get(f"{BASE}/people/{player_id}/stats", params={
             "stats": "gameLog", "group": group,
-            "season": CURRENT_YEAR,
+            "season": CURRENT_YEAR, "sportId": sport_id,
         })
-        splits = data.get("stats", [{}])[0].get("splits", [])
+        # API may return multiple stat objects; collect splits from all of them
+        splits = []
+        for stat_obj in data.get("stats", []):
+            splits.extend(stat_obj.get("splits", []))
         rows   = []
         for split in splits:
             s   = split.get("stat", {})
@@ -640,7 +648,7 @@ def hot_pitchers(df: pd.DataFrame, top_n: int = 20) -> pd.DataFrame:
     return d.sort_values("Heat", ascending=False).head(top_n)
 
 
-def render_game_log(pid, pname: str, group: str) -> None:
+def render_game_log(pid, pname: str, group: str, sport_id: int = 1) -> None:
     """Fetch and render a player's game log inside an expander."""
     if not valid_player_id(pid):
         st.warning("Player ID unavailable — cannot load game log.")
@@ -648,7 +656,7 @@ def render_game_log(pid, pname: str, group: str) -> None:
 
     with st.expander(f"📊 {pname} — {CURRENT_YEAR} Game Log", expanded=True):
         with st.spinner("Loading game log…"):
-            log = fetch_game_log(int(pid), group)
+            log = fetch_game_log(int(pid), group, sport_id)
 
         if log.empty:
             st.info("No game log data available yet for this player.")
@@ -896,11 +904,15 @@ with tab_h:
         sel = event.selection.rows
         if sel:
             row = view.iloc[sel[0]]
-            st.session_state.sel_hitter = {"player_id": row.get("player_id"), "name": row["Player"]}
+            st.session_state.sel_hitter = {
+                "player_id": row.get("player_id"),
+                "name":      row["Player"],
+                "sport_id":  LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
+            }
 
         if st.session_state.sel_hitter:
             info = st.session_state.sel_hitter
-            render_game_log(info["player_id"], info["name"], "hitting")
+            render_game_log(info["player_id"], info["name"], "hitting", info.get("sport_id", 1))
     else:
         st.info("No hitters match the current filters.")
 
@@ -934,11 +946,15 @@ with tab_p:
         sel = event.selection.rows
         if sel:
             row = view.iloc[sel[0]]
-            st.session_state.sel_pitcher = {"player_id": row.get("player_id"), "name": row["Player"]}
+            st.session_state.sel_pitcher = {
+                "player_id": row.get("player_id"),
+                "name":      row["Player"],
+                "sport_id":  LEVEL_KEY_TO_SPORT_ID.get(row.get("level_key", ""), 1),
+            }
 
         if st.session_state.sel_pitcher:
             info = st.session_state.sel_pitcher
-            render_game_log(info["player_id"], info["name"], "pitching")
+            render_game_log(info["player_id"], info["name"], "pitching", info.get("sport_id", 1))
     else:
         st.info("No pitchers match the current filters.")
 
